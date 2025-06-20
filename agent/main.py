@@ -40,7 +40,7 @@ async def startup_event():
         raise RuntimeError("ANTHROPIC_API_KEY not found")
     
     agent = TibiaAgent(api_key)
-    logger.info("🏰 Tibia Agent initialized successfully")
+    logger.info("Tibia Agent initialized successfully")
 
 @app.post("/ask", response_model=QuestionResponse)
 async def ask_question(request: QuestionRequest):

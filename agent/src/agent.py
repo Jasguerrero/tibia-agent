@@ -9,11 +9,10 @@ class TibiaAgent:
         self.model = model
         self.houses_tool = HousesTool()
         self.system_prompt = self._create_system_prompt()
-        self.max_iterations = 5
+        self.max_iterations = 18
         
     def _create_system_prompt(self) -> str:
         return """You are Tibia Agent, an AI assistant specialized in helping players with the MMORPG game Tibia.
-
 Your main expertise:
 - Finding houses and guildhalls available for auction in different worlds and towns
 - Providing detailed information about Tibia real estate market
@@ -25,8 +24,10 @@ Popular Tibia worlds include: Antica, Bona, Celesta, Dolera, Faluna, Garnera, Gl
 
 Common towns include: Thais, Carlin, Venore, Ab'Dendriel, Kazordoon, Ankrahmun, Port Hope, Liberty Bay, Svargrond, Yalahar, Gray Beach, Farmine, Rathleton, Issavi, etc.
 
-Be helpful and provide clear information about auction details like current bids, time remaining, rent costs, and house sizes."""
+Be helpful and provide clear information about auction details like current bids, time remaining, rent costs, and house sizes.
 
+IMPORTANT: If you're running out of iterations, provide a summary of what you've found so far and mention any limitations."""
+    
     def _get_available_tools(self):
         """Returns list of available tools in Anthropic format"""
         return [self.houses_tool.get_function_definition()]
@@ -40,6 +41,52 @@ Be helpful and provide clear information about auction details like current bids
             )
         else:
             return {"error": f"Unknown tool: {tool_name}", "tool_id": tool_use_id}
+    
+    async def _get_fallback_response(self, messages: List[Dict], user_message: str, max_iterations: int) -> str:
+        """Generate a fallback response using the AI when max iterations are reached"""
+        try:
+            fallback_prompt = f"""The conversation has reached the maximum number of processing iterations ({max_iterations}). 
+
+Based on our conversation history, please provide a helpful response to the user's original request: "{user_message}"
+
+Please:
+1. Summarize any information that was gathered during our conversation
+2. Explain that we reached the processing limit
+3. Provide helpful suggestions for how the user could refine their request
+4. Be as helpful as possible with whatever information is available
+
+Keep your response informative and user-friendly."""
+
+            fallback_messages = messages + [{
+                "role": "user", 
+                "content": fallback_prompt
+            }]
+            
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=1000,
+                system=[
+                    {
+                        "type": "text",
+                        "text": self.system_prompt,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ],
+                messages=fallback_messages,
+                extra_headers={"anthropic-beta": "prompt-caching-2024-07-31"}
+            )
+            
+            # Extract text from response
+            text_parts = []
+            for content_block in response.content:
+                if content_block.type == "text":
+                    text_parts.append(content_block.text)
+            
+            return "\n".join(text_parts) if text_parts else None
+            
+        except Exception:
+            # If even the fallback fails, return None to indicate we should use the final fallback
+            return None
     
     async def chat(self, user_message: str) -> AsyncGenerator[Dict[str, str], None]:
         """Main chat method that yields structured updates during processing"""
@@ -55,6 +102,13 @@ Be helpful and provide clear information about auction details like current bids
                 iteration += 1
                 yield {"type": "progress", "content": f"🔄 Iteration {iteration}/{self.max_iterations}"}
                 
+                # Check if we're approaching the limit and should warn the model
+                approaching_limit = iteration >= self.max_iterations - 2
+                current_system_prompt = self.system_prompt
+                
+                if approaching_limit:
+                    current_system_prompt += f"\n\nIMPORTANT: You are approaching the iteration limit ({iteration}/{self.max_iterations}). Please provide a final answer with the information you have gathered so far."
+                
                 # Make API call
                 response = await self.client.messages.create(
                     model=self.model,
@@ -62,7 +116,7 @@ Be helpful and provide clear information about auction details like current bids
                     system=[
                         {
                             "type": "text",
-                            "text": self.system_prompt,
+                            "text": current_system_prompt,
                             "cache_control": {"type": "ephemeral"}  # Cache system prompt
                         }
                     ],
@@ -144,19 +198,17 @@ Be helpful and provide clear information about auction details like current bids
                         yield {"type": "result", "content": "I'm here to help you with Tibia house auctions! Just ask me about houses in any world and town."}
                     return
             
-            # If we've reached max iterations
-            yield {"type": "progress", "content": f"⚠️ Reached maximum iterations ({self.max_iterations}). Stopping here."}
+            # If we've reached max iterations, try to get a proper response
+            yield {"type": "progress", "content": f"⚠️ Reached maximum iterations ({self.max_iterations}). Generating final response..."}
             
-            # Try to get the last assistant response
-            last_message = messages[-1] if messages else None
-            if last_message and last_message.get("role") == "assistant":
-                text_parts = []
-                for content in last_message.get("content", []):
-                    if isinstance(content, dict) and content.get("type") == "text":
-                        text_parts.append(content.get("text", ""))
-                
-                if text_parts:
-                    yield {"type": "result", "content": "\n".join(text_parts)}
+            # Try to get a fallback response from the AI
+            fallback_response = await self._get_fallback_response(messages, user_message, self.max_iterations)
+            
+            if fallback_response:
+                yield {"type": "result", "content": fallback_response}
+            else:
+                # If AI-generated fallback fails, provide a minimal response
+                yield {"type": "result", "content": f"I apologize, but I reached the maximum number of processing steps ({self.max_iterations}) and couldn't complete your request. Please try asking a more specific question or break down your request into smaller parts."}
             
         except Exception as e:
             yield {"type": "result", "content": f"❌ Error: {str(e)}"}
