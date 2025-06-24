@@ -29,83 +29,134 @@ class SplitLootTool:
     
     def _parse_session_data(self, session_data: str) -> Tuple[Dict[str, Dict], str, str]:
         """Parse the session data and extract player information"""
-        lines = session_data.strip().split('\n')
+        
+        # Handle single line format (WhatsApp case)
+        text = session_data.strip().lower()
+        original_text = session_data.strip()
+        
+        logger.info(f"DEBUG: Parsing text: {original_text}")
+        
         players = {}
         session_info = ""
         loot_type = ""
         
-        current_player = None
-        parsing_session_totals = False  # Flag to track if we're in the session totals section
+        # Extract session info using regex
+        date_match = re.search(r'from \d{4}-\d{2}-\d{2}, \d{2}:\d{2}:\d{2} to \d{4}-\d{2}-\d{2}, \d{2}:\d{2}:\d{2}', original_text, re.IGNORECASE)
+        if date_match:
+            session_info += date_match.group() + "\n"
         
-        for i, line in enumerate(lines):
-            line = line.strip()
-            logger.info(f"DEBUG Processing line {i}: '{line}'")
-            
-            # 1. Check for session header info
-            if (line.startswith("Session data:") or 
-                "from 20" in line.lower() or  # Date line
-                line.startswith("Session:") or 
-                re.match(r'\d{2}:\d{2}h', line)):  # Duration
-                logger.info(f"  -> SESSION HEADER")
-                session_info += line + "\n"
-                parsing_session_totals = True  # Next stats will be session totals
-                continue
-                
-            # 2. Check for loot type
-            elif line.startswith("Loot Type:"):
-                logger.info(f"  -> LOOT TYPE")
-                loot_type = line.split(":", 1)[1].strip()
-                session_info += line + "\n"
-                continue
-            
-            # 3. Check if this is a stat line (has colon and looks like stat)
-            elif ":" in line and any(line.lower().startswith(prefix.lower()) for prefix in ["Loot:", "Supplies:", "Balance:", "Damage:", "Healing:"]):
-                logger.info(f"  -> STAT LINE")
-                
-                # If we're parsing session totals, add to session info and skip
-                if parsing_session_totals:
-                    logger.info(f"    -> Adding to session totals")
-                    session_info += line + "\n"
-                    continue
-                
-                # Otherwise, this is a player stat
-                if current_player:
-                    key, value = line.split(":", 1)
-                    key = key.strip().lower()
-                    value = value.strip().replace(",", "")
-                    
-                    try:
-                        if value.startswith("-"):
-                            players[current_player][key] = -int(value[1:])
-                        else:
-                            players[current_player][key] = int(value)
-                        logger.info(f"    -> Set {current_player}[{key}] = {players[current_player][key]}")
-                    except ValueError:
-                        logger.warning(f"Could not parse value '{value}' for key '{key}'")
-                        players[current_player][key] = value
-                else:
-                    logger.warning(f"    -> Found stat line but no current player!")
-            
-            # 4. This should be a player name
+        session_match = re.search(r'session:\s*\d{2}:\d{2}h', original_text, re.IGNORECASE)
+        if session_match:
+            session_info += session_match.group() + "\n"
+        
+        loot_type_match = re.search(r'loot type:\s*(\w+)', original_text, re.IGNORECASE)
+        if loot_type_match:
+            loot_type = loot_type_match.group(1)
+            session_info += f"Loot Type: {loot_type}\n"
+        
+        # Extract session totals (first occurrence of loot/supplies/balance)
+        session_loot_match = re.search(r'loot:\s*([\d,]+)', original_text, re.IGNORECASE)
+        if session_loot_match:
+            session_info += f"Loot: {session_loot_match.group(1)}\n"
+        
+        session_supplies_match = re.search(r'supplies:\s*([\d,]+)', original_text, re.IGNORECASE)
+        if session_supplies_match:
+            session_info += f"Supplies: {session_supplies_match.group(1)}\n"
+        
+        session_balance_match = re.search(r'balance:\s*([-\d,]+)', original_text, re.IGNORECASE)
+        if session_balance_match:
+            session_info += f"Balance: {session_balance_match.group(1)}\n"
+        
+        # Now extract players and their stats
+        # Pattern to find player sections: player_name followed by stats
+        
+        # First, let's find all player names
+        # Look for patterns like "igres loot:" and "luis sainzz (leader) loot:"
+        player_patterns = []
+        
+        # Find potential player names by looking for text before "loot:" that's not at the beginning
+        # Skip the first "loot:" as that's the session total
+        loot_positions = []
+        for match in re.finditer(r'loot:\s*[\d,]+', original_text, re.IGNORECASE):
+            loot_positions.append(match.start())
+        
+        logger.info(f"DEBUG: Found {len(loot_positions)} loot positions: {loot_positions}")
+        
+        # Skip the first loot (session total), process the rest as player data
+        for i, loot_pos in enumerate(loot_positions[1:], 1):  # Skip first one
+            # Look backwards from this loot position to find the player name
+            # Find the previous stat end or beginning of string
+            search_start = 0
+            if i > 1:  # If not the first player
+                # Find the end of previous player's stats
+                prev_section = original_text[:loot_pos]
+                # Look for the last healing/damage/balance before this loot
+                last_stat_match = None
+                for stat_pattern in [r'healing:\s*[\d,]+', r'damage:\s*[\d,]+', r'balance:\s*[-\d,]+']:
+                    for match in re.finditer(stat_pattern, prev_section, re.IGNORECASE):
+                        if not last_stat_match or match.end() > last_stat_match.end():
+                            last_stat_match = match
+                if last_stat_match:
+                    search_start = last_stat_match.end()
             else:
-                # Skip empty lines
-                if not line:
-                    continue
-                    
-                logger.info(f"  -> PLAYER NAME: '{line}'")
-                parsing_session_totals = False  # We're past session totals now
+                # For first player, start after session balance
+                if session_balance_match:
+                    search_start = session_balance_match.end()
+            
+            # Extract potential player name
+            player_section = original_text[search_start:loot_pos].strip()
+            logger.info(f"DEBUG: Player section {i}: '{player_section}'")
+            
+            # Clean up the player name (remove trailing spaces and common words)
+            player_name = player_section.replace("(leader)", "").replace("(Leader)", "").strip()
+            if player_name:
+                logger.info(f"DEBUG: Found player: '{player_name}'")
+                players[player_name] = {}
                 
-                # Clean up player name (remove leader designation)
-                player_name = line.replace("(Leader)", "").replace("(leader)", "").strip()
-                if player_name:
-                    current_player = player_name
-                    players[current_player] = {}
-                    logger.info(f"    -> Added player: '{current_player}'")
+                # Now extract this player's stats
+                # Find the end of this player's section
+                if i < len(loot_positions) - 1:  # Not the last player
+                    next_loot_pos = loot_positions[i + 1]
+                    # Find the player name before the next loot
+                    player_section_end = next_loot_pos
+                    # Look backwards from next loot to find where this player's stats end
+                    section_before_next = original_text[loot_pos:next_loot_pos]
+                    # Find the last stat in this section
+                    last_stat_end = loot_pos
+                    for stat_pattern in [r'healing:\s*[\d,]+', r'damage:\s*[-\d,]+', r'balance:\s*[-\d,]+', r'supplies:\s*[\d,]+']:
+                        for match in re.finditer(stat_pattern, section_before_next, re.IGNORECASE):
+                            actual_pos = loot_pos + match.end()
+                            if actual_pos > last_stat_end:
+                                last_stat_end = actual_pos
+                    player_section_end = last_stat_end
+                else:  # Last player
+                    player_section_end = len(original_text)
+                
+                # Extract stats for this player
+                player_stats_text = original_text[loot_pos:player_section_end]
+                logger.info(f"DEBUG: Player '{player_name}' stats section: '{player_stats_text}'")
+                
+                # Extract individual stats
+                for stat_name, pattern in [
+                    ('loot', r'loot:\s*([\d,]+)'),
+                    ('supplies', r'supplies:\s*([\d,]+)'),
+                    ('balance', r'balance:\s*([-\d,]+)'),
+                    ('damage', r'damage:\s*([\d,]+)'),
+                    ('healing', r'healing:\s*([\d,]+)')
+                ]:
+                    match = re.search(pattern, player_stats_text, re.IGNORECASE)
+                    if match:
+                        value_str = match.group(1).replace(',', '')
+                        try:
+                            if value_str.startswith('-'):
+                                players[player_name][stat_name] = -int(value_str[1:])
+                            else:
+                                players[player_name][stat_name] = int(value_str)
+                            logger.info(f"DEBUG: Set {player_name}[{stat_name}] = {players[player_name][stat_name]}")
+                        except ValueError:
+                            logger.warning(f"Could not parse {stat_name} value: {value_str}")
         
         logger.info(f"DEBUG: Final players parsed: {list(players.keys())}")
-        logger.info(f"DEBUG: Session info: {session_info}")
-        logger.info(f"DEBUG: Loot type: {loot_type}")
-        
         return players, session_info, loot_type
     
     def _calculate_split(self, players: Dict[str, Dict]) -> List[str]:
@@ -195,7 +246,6 @@ class SplitLootTool:
         result = {}
         try:
             logger.info(f"DEBUG: Received session_data length: {len(session_data)}")
-            logger.info(f"DEBUG: First 200 chars: '{session_data[:200]}...'")
             
             # Parse the session data
             players, session_info, loot_type = self._parse_session_data(session_data)
