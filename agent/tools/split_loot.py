@@ -1,5 +1,8 @@
 import re
+import logging
 from typing import Dict, List, Any, Tuple
+
+logger = logging.getLogger(__name__)
 
 class SplitLootTool:
     def __init__(self):
@@ -161,8 +164,9 @@ class SplitLootTool:
         
         return damage_healing_data
     
-    async def execute(self, session_data: str) -> Dict[str, Any]:
+    async def execute(self, session_data: str, db = None) -> Dict[str, Any]:
         """Execute the split loot calculation"""
+        result = {}
         try:
             # Parse the session data
             players, session_info, loot_type = self._parse_session_data(session_data)
@@ -184,11 +188,8 @@ class SplitLootTool:
             total_loot = sum(player_data.get('loot', 0) for player_data in players.values())
             total_supplies = sum(player_data.get('supplies', 0) for player_data in players.values())
             net_profit = total_loot - total_supplies
-            
-            # TODO: Store in database here
-            # await self._store_in_database({...})
-            
-            return {
+
+            result = {
                 "success": True,
                 "transfers": transfers,
                 "damage_healing_data": damage_healing_data,
@@ -203,8 +204,21 @@ class SplitLootTool:
             }
             
         except Exception as e:
-            return {
+            result = {
                 "success": False,
                 "error": f"Failed to process loot split: {str(e)}",
+                "message": session_data,
                 "transfers": []
             }
+        finally:
+            await self._insert_data(result.copy(), db)
+            return result
+        
+    async def _insert_data(self, data, db):
+        if db is None:
+            logger.info("Skipping insertion")
+            return
+        collection = db["session_data"]
+        result = await collection.insert_one(data)
+            
+        logger.info(f"Stored loot session in database with ID: {str(result.inserted_id)}")

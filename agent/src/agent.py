@@ -5,13 +5,14 @@ from agent.tools.houses import HousesTool
 from agent.tools.split_loot import SplitLootTool
 
 class TibiaAgent:
-    def __init__(self, api_key: str, model: str = "claude-3-5-sonnet-20241022"):
+    def __init__(self, api_key: str, model: str = "claude-3-5-sonnet-20241022", database=None):
         self.client = AsyncAnthropic(api_key=api_key)
         self.model = model
         self.houses_tool = HousesTool()
         self.split_loot_tool = SplitLootTool()
         self.system_prompt = self._create_system_prompt()
         self.max_iterations = 18
+        self.db = database
         
     def _create_system_prompt(self) -> str:
         return """You are Tibia Agent, an AI assistant specialized in helping players with the MMORPG game Tibia.
@@ -54,7 +55,8 @@ IMPORTANT: If you're running out of iterations, provide a summary of what you've
             )
         elif tool_name == "split_loot":
             return await self.split_loot_tool.execute(
-                session_data=tool_input.get("session_data")
+                session_data=tool_input.get("session_data"),
+                db=self.db
             )
         else:
             return {"error": f"Unknown tool: {tool_name}", "tool_id": tool_use_id}

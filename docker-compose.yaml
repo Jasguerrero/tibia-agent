@@ -20,7 +20,6 @@ services:
       - tibia-network
 
 networks:
-  tibia-network:
-    driver: bridge
-
+  ticket-app_postgres_network:
+    external: true  # Use the existing network
   
