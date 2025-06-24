@@ -1,5 +1,6 @@
 import re
 import logging
+from datetime import datetime
 from typing import Dict, List, Any, Tuple
 
 logger = logging.getLogger(__name__)
@@ -211,14 +212,16 @@ class SplitLootTool:
                 "transfers": []
             }
         finally:
+            logging.info(f"Inserting: {result.copy()}")
             await self._insert_data(result.copy(), db)
             return result
         
     async def _insert_data(self, data, db):
+        data["created_at"] = datetime.now()
         if db is None:
             logger.info("Skipping insertion")
             return
         collection = db["session_data"]
         result = await collection.insert_one(data)
             
-        logger.info(f"Stored loot session in database with ID: {str(result.inserted_id)}")
+        logger.info(f"Stored loot session in database: {str(result)}")
