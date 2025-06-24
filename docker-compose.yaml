@@ -17,9 +17,9 @@ services:
       retries: 3
       start_period: 40s
     networks:
-      - ticket-app_postgres_network
+      - ticket-app_ticket-app_postgres_network 
 
 networks:
-  ticket-app_postgres_network:
+  ticket-app_ticket-app_postgres_network :
     external: true  # Use the existing network
   
