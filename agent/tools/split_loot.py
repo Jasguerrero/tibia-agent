@@ -34,98 +34,131 @@ class SplitLootTool:
         lines = session_data.strip().split('\n')
         
         # If we only got 1 line, the data might be space-separated instead (WhatsApp bot case)
-        if len(lines) == 1 and len(session_data) > 100:  # Arbitrary length check
+        if len(lines) == 1 and len(session_data) > 100:
             logger.info("DEBUG: Single line detected, attempting to reconstruct lines")
-            text = lines[0]
+            text = lines[0].lower()  # Work with lowercase for pattern matching
+            original_text = lines[0]  # Keep original for final result
             
-            # Replace common patterns that should be on new lines
+            # More precise patterns to reconstruct the session data
+            # We need to be very careful about the order and specificity
             patterns = [
-                (r'(Session:)', r'\n\1'),
-                (r'(Loot Type:)', r'\n\1'),
-                (r'(Loot:)', r'\n\1'),
-                (r'(Supplies:)', r'\n\1'),
-                (r'(Balance:)', r'\n\1'),
-                (r'(Damage:)', r'\n\1'),
-                (r'(Healing:)', r'\n\1'),
-                # Player names - look for name before "loot:" but not if it's the first "Loot:"
-                (r'([a-zA-Z][a-zA-Z\s]+[a-zA-Z])\s+loot:', r'\n\1\nLoot:'),
-                # Handle "(Leader)" pattern
-                (r'\(leader\)\s+loot:', r'(Leader)\nLoot:'),
-                # Handle numbers followed by player names
-                (r'(\d+)\s+([a-zA-Z][a-zA-Z\s]+)\s+loot:', r'\1\n\2\nLoot:'),
+                # First handle the session header parts
+                (r'(session:)', r'\n\1'),
+                (r'(loot type:)', r'\n\1'),
+                
+                # Then handle stat lines - but be more specific
+                (r'(?<!loot type: )(?<!session: )(loot:)', r'\n\1'),  # Don't match "loot type:"
+                (r'(supplies:)', r'\n\1'),
+                (r'(balance:)', r'\n\1'),
+                (r'(damage:)', r'\n\1'),
+                (r'(healing:)', r'\n\1'),
+                
+                # Handle player names - look for names followed by loot/supplies/balance/damage/healing
+                # But exclude session info patterns
+                (r'([a-z\s]+)\s+(loot:|supplies:|balance:|damage:|healing:)', r'\n\1\n\2'),
+                
+                # Handle (leader) pattern specifically
+                (r'\(leader\)\s+(loot:|supplies:|balance:|damage:|healing:)', r'(Leader)\n\1'),
             ]
             
+            # Apply patterns to lowercase text but track positions
+            working_text = original_text
             for pattern, replacement in patterns:
-                text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+                working_text = re.sub(pattern, replacement, working_text, flags=re.IGNORECASE)
             
-            # Split again and clean up
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            # Split and clean up
+            lines = [line.strip() for line in working_text.split('\n') if line.strip()]
             
             logger.info(f"DEBUG: Reconstructed {len(lines)} lines from single line input")
-            for i, line in enumerate(lines[:10]):  # Log first 10 lines only
+            for i, line in enumerate(lines):
                 logger.info(f"DEBUG Line {i}: '{line}'")
         
-        # Now proceed with normal parsing
+        # Now proceed with parsing - with much stricter logic
         players = {}
         session_info = ""
         loot_type = ""
         current_player = None
-        skip_next_stats = False  # Flag to skip total stats after session info
+        in_session_header = True  # Start assuming we're in session header
         
         for i, line in enumerate(lines):
             line = line.strip()
+            logger.info(f"DEBUG Processing line {i}: '{line}'")
             
-            # Extract session info - these lines contain dates, times, session duration
+            # Session info detection - be very specific
             if (line.startswith("Session data:") or 
                 line.startswith("Session:") or 
-                "From 20" in line or  # Date patterns
-                re.match(r'\d{2}:\d{2}h', line)):  # Time duration pattern
+                "from 20" in line.lower() or  # Date patterns
+                re.match(r'\d{2}:\d{2}h', line) or  # Time duration pattern
+                line.startswith("Loot Type:")):
+                
+                logger.info(f"  -> SESSION INFO")
                 session_info += line + "\n"
-                skip_next_stats = True  # Skip the next few stat lines as they're totals
-                continue
-            elif line.startswith("Loot Type:"):
-                loot_type = line.split(":", 1)[1].strip()
-                session_info += line + "\n"
+                if line.startswith("Loot Type:"):
+                    loot_type = line.split(":", 1)[1].strip()
+                in_session_header = True
                 continue
             
-            # Skip total loot/supplies/balance lines that come after session info
-            elif skip_next_stats and line.startswith(("Loot:", "Supplies:", "Balance:")):
-                session_info += line + "\n"  # Add to session info since these are totals
+            # Skip session totals (the first loot/supplies/balance after session info)
+            elif in_session_header and line.startswith(("Loot:", "Supplies:", "Balance:")):
+                logger.info(f"  -> SESSION TOTAL (skipping)")
+                session_info += line + "\n"
+                # Don't set in_session_header = False yet, wait for actual player
                 continue
-            else:
-                skip_next_stats = False
             
-            # Check if this line is a stat line
-            if any(line.startswith(prefix) for prefix in ["Loot:", "Supplies:", "Balance:", "Damage:", "Healing:"]):
-                # This is a stat line, parse it for current player
+            # Check if this is a stat line for current player
+            elif any(line.startswith(prefix) for prefix in ["Loot:", "Supplies:", "Balance:", "Damage:", "Healing:"]):
+                logger.info(f"  -> STAT LINE for player '{current_player}'")
+                in_session_header = False  # We're definitely past session header now
+                
                 if current_player and ":" in line:
                     key, value = line.split(":", 1)
                     key = key.strip().lower()
                     value = value.strip().replace(",", "")
                     
                     try:
-                        # Handle negative values
                         if value.startswith("-"):
                             players[current_player][key] = -int(value[1:])
                         else:
                             players[current_player][key] = int(value)
+                        logger.info(f"    -> Set {current_player}[{key}] = {players[current_player][key]}")
                     except ValueError:
                         logger.warning(f"Could not parse value '{value}' for key '{key}'")
                         players[current_player][key] = value
+            
+            # This should be a player name
             else:
-                # This should be a player name line
+                # Very strict player name detection
+                # Must not be a session line, must not be a stat line, must not be empty
+                # Must not contain common session keywords
+                session_keywords = ['session', 'loot type', 'from 20', 'leader' if line == 'leader' else None]
+                session_keywords = [k for k in session_keywords if k]  # Remove None
+                
+                is_session_line = any(keyword in line.lower() for keyword in session_keywords if keyword)
+                is_stat_line = any(line.startswith(prefix) for prefix in ["Loot:", "Supplies:", "Balance:", "Damage:", "Healing:"])
+                is_time_pattern = re.match(r'\d{2}:\d{2}h', line)
+                
                 if (line and 
-                    not line.startswith(("Session", "Loot Type")) and
-                    "From 20" not in line and
-                    not re.match(r'\d{2}:\d{2}h', line) and
-                    not any(line.startswith(prefix) for prefix in ["Loot:", "Supplies:", "Balance:", "Damage:", "Healing:"])):
+                    not is_session_line and 
+                    not is_stat_line and 
+                    not is_time_pattern and
+                    len(line) > 0):
                     
-                    # Clean up player name (remove leader designation)
+                    # Additional check: if we're still in session header and this looks like a value, skip it
+                    if in_session_header and (line.isdigit() or line in ['leader']):
+                        logger.info(f"  -> SKIPPING (session value): '{line}'")
+                        continue
+                    
+                    logger.info(f"  -> PLAYER NAME: '{line}'")
+                    in_session_header = False  # We're definitely past session header now
+                    
+                    # Clean up player name
                     player_name = line.replace("(Leader)", "").strip()
-                    if player_name:  # Make sure it's not empty
+                    if player_name and len(player_name) > 1:  # Must be more than 1 char
                         current_player = player_name
                         players[current_player] = {}
-                        logger.info(f"DEBUG: Found player: '{current_player}'")
+                        logger.info(f"    -> Added player: '{current_player}'")
+                else:
+                    logger.info(f"  -> IGNORED: '{line}'")
         
         logger.info(f"DEBUG: Final players parsed: {list(players.keys())}")
         return players, session_info, loot_type
