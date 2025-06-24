@@ -29,11 +29,46 @@ class SplitLootTool:
     
     def _parse_session_data(self, session_data: str) -> Tuple[Dict[str, Dict], str, str]:
         """Parse the session data and extract player information"""
+        
+        # First try normal line splitting
         lines = session_data.strip().split('\n')
+        
+        # If we only got 1 line, the data might be space-separated instead (WhatsApp bot case)
+        if len(lines) == 1 and len(session_data) > 100:  # Arbitrary length check
+            logger.info("DEBUG: Single line detected, attempting to reconstruct lines")
+            text = lines[0]
+            
+            # Replace common patterns that should be on new lines
+            patterns = [
+                (r'(Session:)', r'\n\1'),
+                (r'(Loot Type:)', r'\n\1'),
+                (r'(Loot:)', r'\n\1'),
+                (r'(Supplies:)', r'\n\1'),
+                (r'(Balance:)', r'\n\1'),
+                (r'(Damage:)', r'\n\1'),
+                (r'(Healing:)', r'\n\1'),
+                # Player names - look for name before "loot:" but not if it's the first "Loot:"
+                (r'([a-zA-Z][a-zA-Z\s]+[a-zA-Z])\s+loot:', r'\n\1\nLoot:'),
+                # Handle "(Leader)" pattern
+                (r'\(leader\)\s+loot:', r'(Leader)\nLoot:'),
+                # Handle numbers followed by player names
+                (r'(\d+)\s+([a-zA-Z][a-zA-Z\s]+)\s+loot:', r'\1\n\2\nLoot:'),
+            ]
+            
+            for pattern, replacement in patterns:
+                text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+            
+            # Split again and clean up
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            
+            logger.info(f"DEBUG: Reconstructed {len(lines)} lines from single line input")
+            for i, line in enumerate(lines[:10]):  # Log first 10 lines only
+                logger.info(f"DEBUG Line {i}: '{line}'")
+        
+        # Now proceed with normal parsing
         players = {}
         session_info = ""
         loot_type = ""
-        
         current_player = None
         skip_next_stats = False  # Flag to skip total stats after session info
         
@@ -55,6 +90,7 @@ class SplitLootTool:
             
             # Skip total loot/supplies/balance lines that come after session info
             elif skip_next_stats and line.startswith(("Loot:", "Supplies:", "Balance:")):
+                session_info += line + "\n"  # Add to session info since these are totals
                 continue
             else:
                 skip_next_stats = False
@@ -74,16 +110,24 @@ class SplitLootTool:
                         else:
                             players[current_player][key] = int(value)
                     except ValueError:
+                        logger.warning(f"Could not parse value '{value}' for key '{key}'")
                         players[current_player][key] = value
             else:
                 # This should be a player name line
-                if line and not line.startswith(("Session", "Loot Type", "From 20")):
+                if (line and 
+                    not line.startswith(("Session", "Loot Type")) and
+                    "From 20" not in line and
+                    not re.match(r'\d{2}:\d{2}h', line) and
+                    not any(line.startswith(prefix) for prefix in ["Loot:", "Supplies:", "Balance:", "Damage:", "Healing:"])):
+                    
                     # Clean up player name (remove leader designation)
                     player_name = line.replace("(Leader)", "").strip()
                     if player_name:  # Make sure it's not empty
                         current_player = player_name
                         players[current_player] = {}
+                        logger.info(f"DEBUG: Found player: '{current_player}'")
         
+        logger.info(f"DEBUG: Final players parsed: {list(players.keys())}")
         return players, session_info, loot_type
     
     def _calculate_split(self, players: Dict[str, Dict]) -> List[str]:
@@ -98,6 +142,9 @@ class SplitLootTool:
         
         # Number of players
         num_players = len(players)
+        
+        if num_players == 0:
+            return []
         
         # Each player's fair share
         fair_share = net_profit / num_players
@@ -169,6 +216,9 @@ class SplitLootTool:
         """Execute the split loot calculation"""
         result = {}
         try:
+            logger.info(f"DEBUG: Received session_data length: {len(session_data)}")
+            logger.info(f"DEBUG: First 200 chars: '{session_data[:200]}...'")
+            
             # Parse the session data
             players, session_info, loot_type = self._parse_session_data(session_data)
             
@@ -189,7 +239,6 @@ class SplitLootTool:
             total_loot = sum(player_data.get('loot', 0) for player_data in players.values())
             total_supplies = sum(player_data.get('supplies', 0) for player_data in players.values())
             net_profit = total_loot - total_supplies
-
             result = {
                 "success": True,
                 "transfers": transfers,
@@ -205,6 +254,7 @@ class SplitLootTool:
             }
             
         except Exception as e:
+            logger.error(f"Exception in execute: {str(e)}", exc_info=True)
             result = {
                 "success": False,
                 "error": f"Failed to process loot split: {str(e)}",
@@ -212,7 +262,7 @@ class SplitLootTool:
                 "transfers": []
             }
         finally:
-            logging.info(f"Inserting: {result.copy()}")
+            logger.info(f"Inserting: {result}")
             await self._insert_data(result.copy(), db)
             return result
         
@@ -224,4 +274,4 @@ class SplitLootTool:
         collection = db["session_data"]
         result = await collection.insert_one(data)
             
-        logger.info(f"Stored loot session in database: {str(result)}")
+        logger.info(f"Stored loot session in database with ID: {str(result.inserted_id)}")
